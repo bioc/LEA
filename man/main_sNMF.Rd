@@ -110,7 +110,7 @@ snmf (input.file, K,
 \value{
 \code{snmf} returns an object of class \code{snmfProject}.
 
-The following methods can be applied to the object of class {snmfProject}:
+The following methods can be applied to the object of class \code{snmfProject}:
 \item{plot}{
     Plot the minimal cross-entropy in function of K.
 }

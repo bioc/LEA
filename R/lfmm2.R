@@ -82,8 +82,8 @@ lfmm2 <- function(input,
     svx <- svd(x = Xs, nu = n)
     Q <- svx$u
     
-    d_lambda <- c(sqrt(lambda/(lambda + svx$d)), rep(1, n-d))
-    d_lambda_inv <- c(sqrt((lambda + svx$d)/lambda), rep(1, n-d))
+    d_lambda <- c(sqrt(lambda/(lambda + svx$d^2)), rep(1, n-d))
+    d_lambda_inv <- c(sqrt((lambda + svx$d^2)/lambda), rep(1, n-d))
     D_inv <- diag(d_lambda_inv)
     D  <- diag(d_lambda)
  
