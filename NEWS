@@ -1,3 +1,11 @@
+3.25.2
+- Correct genomic inflation factors in lfmm2.test() for multivariate GLM
+  association tests: compute one factor per environmental covariate across loci,
+  rather than one per locus.
+- Calibrated p-values may change substantially; rerun affected analyses.
+- Raw GLM statistics, uncalibrated p-values, single-covariate behavior,
+  linear tests and full tests are unchanged.
+
 1.0.0
 - first released version.
 0.99.0
