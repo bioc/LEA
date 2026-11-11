@@ -248,10 +248,17 @@ setMethod("lfmm2.test", "lfmm2Class",
               
               if (d == 1){
                 gif <- median(z_score^2)/qchisq(0.5, df = 1, lower.tail = FALSE)
-              } else {
+              } else if (linear) {
                 gif <- apply(z_score^2, 1, median)/qchisq(0.5, df = 1, lower.tail = FALSE)
+              } else {
+                # GLM statistics have loci in rows and covariates in columns.
+                gif <- apply(z_score^2, 2, median)/qchisq(0.5, df = 1, lower.tail = FALSE)
               }
+              if (!linear && d > 1) {
+                p_value <- pchisq(sweep(z_score^2, 2, gif, "/"), df = 1, lower.tail = FALSE)
+              } else {
                 p_value <- pchisq(z_score^2/gif, df = 1, lower.tail = FALSE)
+              }
                 
             } else {
               
