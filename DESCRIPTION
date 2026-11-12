@@ -14,7 +14,9 @@ Authors@R: c(
            role = "aut")
     )
 Depends: R (>= 3.3.0), methods, stats, utils, graphics
-Suggests: knitr
+Suggests: knitr,
+    testthat (>= 3.0.0)
+Config/testthat/edition: 3
 Description: LEA is an R package dedicated to population genomics, landscape genomics and
         genotype-environment association tests. LEA can run analyses of
         population structure and genome-wide tests for local adaptation, 

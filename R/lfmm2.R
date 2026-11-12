@@ -127,6 +127,134 @@ lfmm2 <- function(input,
 
 
             
+# Fast summaries are restricted to regular multivariate fits. Keep summary.lm's
+# historical errors, alias extraction and warnings for exceptional fits.
+.lfmm2_regular_fit <- function(model) {
+    if (!inherits(model, "mlm") || model$rank != nrow(model$coefficients) ||
+        model$df.residual <= 0 || model$rank <= 1L ||
+        anyNA(colnames(model$coefficients))) return(FALSE)
+    variance <- colSums(model$residuals^2) / model$df.residual
+    if (any(!is.finite(variance))) return(FALSE)
+    # Conservative upper bound for mean(f)^2 + var(f): delegate every possible
+    # "essentially perfect fit" warning to the original summaries.
+    bound <- colSums(model$fitted.values^2) /
+        (nrow(model$fitted.values) - 1L)
+    !any(variance < bound * 1e-30)
+}
+
+.lfmm2_response_names <- function(model) {
+    labels <- colnames(model$coefficients)
+    defaults <- paste0("Y", seq_len(ncol(model$coefficients)))
+    if (is.null(labels)) labels <- defaults
+    labels[labels == ""] <- defaults[labels == ""]
+    paste("Response", labels)
+}
+
+.lfmm2_linear_statistics <- function(model, d) {
+    if (!.lfmm2_regular_fit(model) || d < 1L) {
+        sm <- summary(model)
+        return(list(pvalues = sapply(sm, function(x) x$coeff[2:(d + 1), 4]),
+                    zscores = as.matrix(sapply(sm, function(x) x$coeff[2:(d + 1), 3]))))
+    }
+    rank <- model$rank
+    selected <- seq_len(d) + 1L
+    # summary.lm uses the pivot order, including its historical positional
+    # coefficient extraction. Rank-deficient fits use the fallback above.
+    coefficients <- model$coefficients[model$qr$pivot[seq_len(rank)], , drop = FALSE]
+    unscaled <- diag(chol2inv(model$qr$qr[seq_len(rank), seq_len(rank), drop = FALSE]))
+    variance <- colSums(model$residuals^2) / model$df.residual
+    statistic <- coefficients[selected, , drop = FALSE] /
+        sqrt(outer(unscaled[selected], variance))
+    probability <- 2 * stats::pt(abs(statistic), model$df.residual, lower.tail = FALSE)
+    labels <- .lfmm2_response_names(model)
+    if (d == 1L) {
+        probability <- as.vector(probability)
+        names(probability) <- labels
+        statistic <- matrix(as.vector(statistic), ncol = 1L,
+                            dimnames = list(labels, NULL))
+    } else {
+        dimnames(statistic) <- dimnames(probability) <-
+            list(rownames(coefficients)[selected], labels)
+    }
+    list(pvalues = probability, zscores = statistic)
+}
+
+.lfmm2_full_statistics <- function(model) {
+    if (!.lfmm2_regular_fit(model)) {
+        sm <- summary(model)
+        return(list(adj.r.squared = sapply(sm, function(x) x$adj.r.squared),
+                    fscores = sapply(sm, function(x) x$fstat[1]),
+                    pvalues = sapply(sm, function(x)
+                        pf(x$fstat[1], x$fstat[2], x$fstat[3], lower.tail = FALSE))))
+    }
+    fitted <- model$fitted.values
+    mss <- colSums(sweep(fitted, 2L, colMeans(fitted))^2)
+    rss <- colSums(model$residuals^2)
+    rdf <- model$df.residual
+    # Preserve summary.lm's historical second-stage degrees of freedom, NOT
+    # those of a conventional partial F test including the nuisance factors.
+    numerator_df <- model$rank - 1L
+    statistic <- (mss / numerator_df) / (rss / rdf)
+    adjusted <- 1 - (1 - mss / (mss + rss)) *
+        ((nrow(fitted) - 1L) / rdf)
+    labels <- .lfmm2_response_names(model)
+    names(statistic) <- paste0(labels, ".value")
+    names(adjusted) <- labels
+    list(adj.r.squared = adjusted, fscores = statistic,
+         pvalues = pf(statistic, numerator_df, rdf, lower.tail = FALSE))
+}
+
+# Custom family factories, initializers and callbacks retain formula-based glm.
+.lfmm2_glm_reusable_family <- function(family) {
+    if (!is.list(family) || !inherits(family, "family") ||
+        !is.character(family$family) || length(family$family) != 1L ||
+        anyNA(family$family)) return(FALSE)
+    factory <- switch(family$family,
+        gaussian = stats::gaussian, binomial = stats::binomial,
+        poisson = stats::poisson, Gamma = stats::Gamma,
+        inverse.gaussian = stats::inverse.gaussian,
+        quasibinomial = stats::quasibinomial, quasipoisson = stats::quasipoisson)
+    if (is.null(factory) || !is.character(family$link) || length(family$link) != 1L)
+        return(FALSE)
+    reference <- tryCatch(factory(link = family$link), error = function(e) NULL)
+    if (is.null(reference) || !identical(family$initialize, reference$initialize))
+        return(FALSE)
+    callbacks <- family[vapply(family, is.function, logical(1))]
+    all(vapply(callbacks, function(fun)
+        !is.null(environment(fun)) &&
+        identical(topenv(environment(fun)), asNamespace("stats")), logical(1)))
+}
+
+.lfmm2_glm_reusable_na_action <- function(action, envir) {
+    if (is.null(action)) return(TRUE)
+    if (is.character(action) && length(action) == 1L && !anyNA(action)) {
+        action <- tryCatch(get(action, envir = envir, mode = "function"),
+                           error = function(e) NULL)
+    }
+    if (!is.function(action)) return(FALSE)
+    standard <- list(stats::na.omit, stats::na.exclude, stats::na.fail, stats::na.pass)
+    any(vapply(standard, function(fun) identical(action, fun), logical(1)))
+}
+
+.lfmm2_glm_refit <- function(design, response, family, template) {
+    frame_response <- response
+    names(response) <- names(template$y)
+    model <- stats::glm.fit(x = design, y = response,
+        weights = NULL, start = NULL, etastart = NULL, mustart = NULL,
+        offset = NULL, family = family, control = template$control,
+        intercept = attr(template$terms, "intercept") > 0L, singular.ok = TRUE)
+    # Preserve glm's summary metadata and raw model response, while sharing the
+    # fixed predictor columns. IRLS, dispersion and inference still use stats.
+    model$model <- template$model
+    names(frame_response) <- names(template$model[[1L]])
+    model$model[[1L]] <- frame_response
+    fields <- c("call", "formula", "terms", "data", "offset", "control",
+                "method", "contrasts", "xlevels")
+    model[fields] <- template[fields]
+    class(model) <- c("glm", "lm")
+    model
+}
+
 setGeneric("lfmm2.test", function(object, input, env, 
                                   full = FALSE,
                                   genomic.control = TRUE, 
@@ -213,29 +341,72 @@ setMethod("lfmm2.test", "lfmm2Class",
               ## partial regression 
               mod_Y <- lm(Y ~ ., data = data.frame(object@U)) 
               res_Y = mod_Y$residuals
-              mod_X = lm(X ~ ., data = data.frame(object@U))
-              res_X = mod_X$residuals
+              if (p > 1L && is.null(mod_Y$na.action) &&
+                  mod_Y$rank == ncol(object@U) + 1L) {
+                # Reuse the same nuisance QR for X. With omitted rows or an
+                # aliased nuisance design, retain the original lm() path.
+                res_X <- qr.resid(mod_Y$qr, X)
+                if (d == 1L) res_X <- drop(res_X)
+              } else {
+                mod_X = lm(X ~ ., data = data.frame(object@U))
+                res_X = mod_X$residuals
+              }
               
               mod_lm =  lm(res_Y ~ res_X)
-              sm = summary(mod_lm)
-              r_squared <- sapply(sm, FUN = function(x) x$adj.r.squared)
-              f_score <- sapply(sm, FUN = function(x) x$fstat[1])
-              p_value <- sapply(sm, FUN = function(x) pf(x$fstat[1], x$fstat[2], x$fstat[3], lower.tail = F))
+              statistics <- .lfmm2_full_statistics(mod_lm)
+              r_squared <- statistics$adj.r.squared
+              f_score <- statistics$fscores
+              p_value <- statistics$pvalues
               
             } else {
             
             ## All p-values returned    
             if (linear){
               mod_lm <- lm(Y ~ ., data = data.frame(X, object@U)) 
-              sm <- summary(mod_lm)
-              p_value <- sapply(sm, FUN = function(x) x$coeff[2:(d + 1), 4])
-              z_score <- as.matrix(sapply(sm, FUN = function(x) x$coeff[2:(d + 1), 3]))
+              statistics <- .lfmm2_linear_statistics(mod_lm, d)
+              p_value <- statistics$pvalues
+              z_score <- statistics$zscores
             } else {
-              for (j in 1:p) {
+              na_action <- getOption("na.action")
+              j <- 1L
               mod_glm <- glm(Y[, j] ~ ., data = data.frame(X, object@U), family = family)
               sm <- summary(mod_glm)
-              p_value <- rbind(p_value, sm$coeff[2:(d + 1), 4])
-              z_score <- rbind(z_score, sm$coeff[2:(d + 1), 3])
+              probability <- sm$coeff[2:(d + 1), 4]
+              statistic <- sm$coeff[2:(d + 1), 3]
+              # Match rbind()'s first-row names and singleton simplification.
+              # Allocate once, before iterating over the remaining loci.
+              p_value <- matrix(NA_real_, p, length(probability))
+              z_score <- matrix(NA_real_, p, length(statistic))
+              if (!is.null(names(probability))) colnames(p_value) <- names(probability)
+              if (!is.null(names(statistic))) colnames(z_score) <- names(statistic)
+              p_value[1L, ] <- probability
+              z_score[1L, ] <- statistic
+              # The first ordinary glm supplies exact terms, contrasts,
+              # observation names and controls for subsequent fits.
+              reuse_design <- p > 1L &&
+                  "singular.ok" %in% names(formals(stats::glm.fit)) &&
+                  is.numeric(Y) && is.numeric(X) &&
+                  is.numeric(object@U) && is.null(attr(Y, "class")) &&
+                  is.null(attr(X, "class")) && is.null(attr(object@U, "class")) &&
+                  all(is.finite(Y)) && is.null(mod_glm$na.action) &&
+                  nrow(mod_glm$model) == n &&
+                  identical(na_action, getOption("na.action")) &&
+                  .lfmm2_glm_reusable_na_action(na_action, environment(mod_glm$formula)) &&
+                  is.null(mod_glm$offset) && .lfmm2_glm_reusable_family(family)
+              if (reuse_design) {
+                template <- mod_glm
+                design <- stats::model.matrix(template$terms, template$model,
+                                              contrasts.arg = template$contrasts)
+              }
+              for (j in seq_len(p)[-1L]) {
+                if (reuse_design) {
+                  mod_glm <- .lfmm2_glm_refit(design, Y[, j], family, template)
+                } else {
+                  mod_glm <- glm(Y[, j] ~ ., data = data.frame(X, object@U), family = family)
+                }
+                sm <- summary(mod_glm)
+                p_value[j, ] <- sm$coeff[2:(d + 1), 4]
+                z_score[j, ] <- sm$coeff[2:(d + 1), 3]
               }
             }
             
