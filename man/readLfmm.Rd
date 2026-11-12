@@ -22,6 +22,19 @@ per SNP.
 }
 }
 
+\details{
+Numeric records are read in blocks after checking that their column counts
+agree. Spaces, tabs, blank lines, LF and CRLF line endings, and a final record
+without a newline are supported. Missing-value codes 9 and -9 remain numeric
+codes; \code{NA} is read as an R missing value. Numeric dosage values are
+supported. Storage type and matrix names follow the historical reader.
+
+Short files and nonstandard input, such as quoted fields, comments, and
+header or row-name conventions, use the historical \code{read.table} path.
+Malformed records are never repaired by repartitioning a flat token stream.
+The input file must remain unchanged during reading.
+}
+
 \author{
     Eric Frichot
 }
