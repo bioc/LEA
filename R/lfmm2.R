@@ -8,11 +8,228 @@ setClass("lfmm2Class",
                    )
 )
 
+# Environmental preparation is deliberately separate from LFMM2 inference.
+.lfmm2_numeric_frame <- function(env) {
+    if (!is.data.frame(env) || !ncol(env) ||
+        !all(vapply(env, function(x)
+            (is.integer(x) || is.double(x)) && !is.object(x) &&
+            is.null(dim(x)), logical(1))))
+        stop("'env' must be a data.frame containing only ordinary numeric columns.")
+}
+
+# Validate language before evaluating any transformation. No user calls are run.
+.lfmm2_formula_terms <- function(formula) {
+    fail <- function() stop("Unsupported LFMM2 formula: use additive numeric variables, I(x^k) with a positive integer literal, log(x), or sqrt(x); interactions and arbitrary calls are not allowed.")
+    if (!inherits(formula, "formula") || length(formula) != 2L) fail()
+    rhs <- formula[[2L]]
+    literal <- function(x, value) is.numeric(x) && length(x) == 1L &&
+        is.finite(x) && x == value
+    if (is.call(rhs) && identical(rhs[[1L]], as.name("-"))) {
+        if (length(rhs) != 3L || !literal(rhs[[3L]], 1)) fail()
+        rhs <- rhs[[2L]]
+    }
+    flatten <- function(x) {
+        if (is.call(x) && identical(x[[1L]], as.name("+")) && length(x) == 3L)
+            return(c(flatten(x[[2L]]), flatten(x[[3L]])))
+        if (literal(x, 0)) return(list())
+        list(x)
+    }
+    expressions <- flatten(rhs)
+    if (!length(expressions)) fail()
+    variable <- function(x) {
+        if (!is.symbol(x) || identical(x, as.name("."))) fail()
+        as.character(x)
+    }
+    terms <- lapply(expressions, function(x) {
+        op <- "identity"; exponent <- NULL
+        if (is.symbol(x)) {
+            name <- variable(x)
+        } else {
+            if (!is.call(x) || length(x) != 2L || !is.symbol(x[[1L]])) fail()
+            if (!is.null(names(x)) && any(nzchar(names(x)[-1L])))
+                stop("Named arguments are not supported in LFMM2 formula transformations.")
+            op <- as.character(x[[1L]])
+            if (op == "I") {
+                power <- x[[2L]]
+                if (!is.call(power) || length(power) != 3L ||
+                    !identical(power[[1L]], as.name("^"))) fail()
+                if (!is.null(names(power)) && any(nzchar(names(power)[-1L])))
+                    stop("Named arguments are not supported in LFMM2 formula transformations.")
+                name <- variable(power[[2L]])
+                exponent <- power[[3L]]
+                if (!is.numeric(exponent) || length(exponent) != 1L ||
+                    !is.finite(exponent) || exponent < 1 || exponent != floor(exponent)) fail()
+                op <- "power"
+            } else {
+                if (!op %in% c("log", "sqrt")) fail()
+                name <- variable(x[[2L]])
+            }
+        }
+        list(variable = name, op = op, exponent = exponent,
+             label = paste(deparse(x, width.cutoff = 500L, backtick = TRUE), collapse = ""))
+    })
+    labels <- vapply(terms, function(x) x$label, character(1))
+    if (anyDuplicated(labels)) stop("Duplicated terms in LFMM2 formula.")
+    list(terms = terms, labels = labels,
+         normalized = paste("~", paste(labels, collapse = " + ")))
+}
+
+.lfmm2_env_spec <- function(object) {
+    spec <- attr(object, "env.spec", exact = TRUE)
+    if (is.null(spec)) return(NULL)
+    fail <- function(detail)
+        stop("Invalid or unsupported LFMM2 environmental metadata: ", detail, ".", call. = FALSE)
+    if (typeof(spec) != "list" || is.object(spec) || !is.null(dim(spec)))
+        fail("expected a named list")
+    keys <- names(spec)
+    required <- c("version", "formula", "mode", "predictors", "n", "d")
+    if (is.null(keys) || anyNA(keys) || any(!nzchar(keys)) || anyDuplicated(keys) ||
+        length(keys) != length(required) || !all(required %in% keys))
+        fail("missing, invalid or duplicated keys")
+    if (!identical(spec[["version", exact = TRUE]], 1L)) fail("unsupported schema version")
+    mode <- spec[["mode", exact = TRUE]]
+    if (!is.character(mode) || !is.null(attributes(mode)) || length(mode) != 1L ||
+        is.na(mode) || !mode %in% c("formula", "matrix", "data.frame", "file"))
+        fail("invalid input mode")
+    dimension <- function(x) is.integer(x) && is.null(attributes(x)) &&
+        length(x) == 1L && !is.na(x) && x > 0L
+    n <- spec[["n", exact = TRUE]]
+    d <- spec[["d", exact = TRUE]]
+    if (!dimension(n) || !dimension(d) || d > n) fail("invalid dimensions")
+    predictors <- spec[["predictors", exact = TRUE]]
+    if (!is.null(predictors) && (!is.character(predictors) ||
+        !is.null(dim(predictors)) || length(predictors) != d))
+        fail("invalid predictor structure")
+    formula <- spec[["formula", exact = TRUE]]
+    if (mode == "formula") {
+        if (!is.character(formula) || !is.null(attributes(formula)) ||
+            length(formula) != 1L || is.na(formula) || !nzchar(formula))
+            fail("formula mode requires a formula string")
+        if (d >= n || is.null(predictors) || anyNA(predictors) ||
+            any(!nzchar(predictors)) || anyDuplicated(predictors))
+            fail("formula dimensions or predictor structure")
+        # Parse language only: malformed metadata must not execute R code.
+        parsed <- tryCatch(parse(text = formula, keep.source = FALSE), error = function(e) NULL)
+        if (length(parsed) != 1L || !is.call(parsed[[1L]]) ||
+            !identical(parsed[[1L]][[1L]], as.name("~"))) fail("invalid formula")
+        compiled <- tryCatch(.lfmm2_formula_terms(structure(parsed[[1L]],
+            class = "formula", .Environment = baseenv())), error = function(e) NULL)
+        if (is.null(compiled)) fail("invalid formula")
+        if (length(compiled[["terms", exact = TRUE]]) != d ||
+            !identical(compiled[["labels", exact = TRUE]], predictors))
+            fail("formula dimensions or predictor structure")
+    } else if (!is.null(formula)) {
+        fail("formula must be NULL outside formula mode")
+    }
+    spec
+}
+
+.lfmm2_formula_diagnostic <- function(X) {
+    # Subtract an anchor before centering to retain small variation around a
+    # large absolute level. This copy never enters the statistical models.
+    vapply(seq_len(ncol(X)), function(j) {
+        x <- as.double(X[, j])
+        shifted <- x - x[1L]
+        if (any(!is.finite(shifted))) {
+            x <- x / max(abs(x))
+            shifted <- x - x[1L]
+        }
+        shifted <- shifted / max(abs(shifted))
+        centered <- shifted - mean(shifted)
+        centered / sqrt(sum(centered^2))
+    }, numeric(nrow(X)))
+}
+
+.lfmm2_prepare_env <- function(env, formula = NULL, spec = NULL) {
+    if (!is.null(spec) && !is.null(spec$formula)) {
+        if (!is.character(spec$formula) || length(spec$formula) != 1L ||
+            is.na(spec$formula)) stop("Invalid LFMM2 formula metadata.")
+        formula <- stats::as.formula(spec$formula, env = baseenv())
+    }
+    if (is.null(formula)) {
+        # Keep the historical file/matrix/vector path and its diagnostics.
+        if (is.character(env)) {
+            X <- read.env(env)
+            if (anyNA(X)) stop("'env' file contains missing data (NA).")
+            mode <- "file"
+        } else {
+            if (is.null(env)) stop("NULL value for argument 'env'.")
+            if (is.data.frame(env)) .lfmm2_numeric_frame(env)
+            X <- as.matrix(env)
+            if (anyNA(X)) stop("The environmental matrix contains NA.")
+            mode <- if (is.data.frame(env)) "data.frame" else "matrix"
+        }
+        normalized <- NULL
+    } else {
+        .lfmm2_numeric_frame(env)
+        if (is.null(names(env)) || anyNA(names(env)) ||
+            any(!nzchar(names(env))) || anyDuplicated(names(env)))
+            stop("Formula 'env' columns must have unique, nonempty names.")
+        compiled <- .lfmm2_formula_terms(formula)
+        required <- vapply(compiled$terms, function(x) x$variable, character(1))
+        missing <- setdiff(required, names(env))
+        if (length(missing)) stop("Missing formula variables in 'env': ", paste(missing, collapse = ", "))
+        if (!nrow(env)) stop("Formula 'env' must contain individuals.")
+        values <- lapply(compiled$terms, function(term) {
+            x <- env[[term$variable]]
+            if (any(!is.finite(x))) stop("Non-finite values in formula variable '", term$variable, "'.")
+            x <- suppressWarnings(switch(term$op, identity = x,
+                power = x ^ term$exponent, log = log(x), sqrt = sqrt(x)))
+            if (length(x) != nrow(env) || any(!is.finite(x)))
+                stop("Formula term '", term$label, "' must produce finite numeric values for every individual.")
+            if (all(x == x[1L])) stop("Constant formula predictor: ", term$label)
+            x
+        })
+        X <- do.call(cbind, values)
+        dimnames(X) <- list(rownames(env), compiled$labels)
+        diagnostic <- .lfmm2_formula_diagnostic(X)
+        if (qr(diagnostic, tol = .Machine$double.eps * max(dim(diagnostic)))$rank < ncol(X))
+            stop("Linearly dependent formula predictors at numerical precision.")
+        normalized <- compiled$normalized
+        mode <- "formula"
+        if (!is.null(spec) && (!identical(nrow(X), spec$n) ||
+            !identical(ncol(X), spec$d) || !identical(colnames(X), spec$predictors)))
+            stop("Formula environmental dimensions or predictor structure differ from the LFMM2 fit.")
+    }
+    list(X = X, spec = list(version = 1L, formula = normalized, mode = mode,
+         predictors = colnames(X), n = nrow(X), d = ncol(X)))
+}
+
+# Check the fitted QR, not summary coefficient positions. For the uncommon
+# rank-deficient case, put nuisance columns first to distinguish a redundant
+# nuisance column from an environmental effect confounded with nuisance terms.
+.lfmm2_check_estimable <- function(model, predictors, design = NULL,
+                                  columns = seq_along(predictors) + 1L,
+                                  expected = NULL) {
+    retained <- model$qr$pivot[seq_len(model$rank)]
+    bad <- !columns %in% retained
+    if (!is.null(expected)) {
+        labels <- if (is.matrix(model$coefficients)) rownames(model$coefficients)
+                  else names(model$coefficients)
+        bad <- bad | is.na(labels[columns]) | labels[columns] != expected
+    }
+    if (!any(bad) && model$rank < NROW(model$coefficients)) {
+        if (is.null(design)) design <- stats::model.matrix(model)
+        if (!is.null(model$weights)) {
+            active <- model$weights > 0
+            design <- design[active, , drop = FALSE] * sqrt(model$weights[active])
+        }
+        order <- c(setdiff(seq_len(ncol(design)), columns), columns)
+        diagnostic <- qr(design[, order, drop = FALSE], tol = model$qr$tol)
+        bad <- !columns %in% order[diagnostic$pivot[seq_len(diagnostic$rank)]]
+    }
+    if (any(bad))
+        stop("Non-estimable environmental predictors in formula association model: ",
+             paste(predictors[bad], collapse = ", "))
+    invisible(NULL)
+}
+
 lfmm2 <- function(input,
                   env, 
                   K, 
                   lambda = 1e-5,
-                  effect.sizes = FALSE){
+                  effect.sizes = FALSE,
+                  formula = NULL){
 
 ## Check input response matrix 
 ## LEA  
@@ -40,20 +257,8 @@ lfmm2 <- function(input,
 
 ## Check independent/covariate env matrix  
 ## LEA 
-  if (is.character(env)){
-    X <- read.env(env)
-    if (anyNA(X)){
-      stop("'env' file contains missing data (NA).")
-    }
-  } else {
-    if (is.null(env)){
-      stop("NULL value for argument 'env'.")
-    }
-    X <- as.matrix(env)
-    if (anyNA(X)) {
-      stop("The environmental matrix contains NA.")
-    }
-  }
+  prepared <- .lfmm2_prepare_env(env, formula = formula)
+  X <- prepared$X
 
   if (length(K) > 1){
     stop("Multiple values of K not allowed.")
@@ -120,6 +325,7 @@ lfmm2 <- function(input,
     obj@B <- as.matrix(B)
     obj@U <- as.matrix(U)
     obj@V <- as.matrix(V)
+    attr(obj, "env.spec") <- prepared$spec
 
 ## LEA 
     return(obj)
@@ -297,21 +503,12 @@ setMethod("lfmm2.test", "lfmm2Class",
             
             ## Check independent/covariate matrix  
             ## LEA 
-            if (is.character(env)){
-              X <- read.env(env)
-              if (anyNA(X)){
-                stop("'env' file contains missing data (NA).")
-              }
-            } else {
-              if (is.null(env)){
-                stop("NULL value for argument 'env'.")
-              }
-              X <- as.matrix(env)
-              if (anyNA(X)) {
-                stop("The environmental matrix contains NA.")
-              }
-            }
-            
+            spec <- .lfmm2_env_spec(object)
+            X <- .lfmm2_prepare_env(env, spec = spec)$X
+            formula_fit <- !is.null(spec) && !is.null(spec$formula)
+            if (formula_fit && nrow(object@U) != nrow(X))
+                stop("Formula individuals do not match the LFMM2 latent factors.")
+
             d <-  ncol(X) #number of environmental variables
             n <-  nrow(X) #number of individuals
             
@@ -323,6 +520,7 @@ setMethod("lfmm2.test", "lfmm2Class",
               stop("The environmental covariate matrix X contains more columns (d) than rows (n).")
             }
    
+            environment_names <- if (formula_fit) names(data.frame(X, object@U))[seq_len(d)] else NULL
             p <- ncol(Y)
             gif <-  NULL
             p_value <- NULL
@@ -352,7 +550,22 @@ setMethod("lfmm2.test", "lfmm2Class",
                 res_X = mod_X$residuals
               }
               
+              if (formula_fit) {
+                # Use the nuisance columns retained by the actual first stage.
+                # A normalized diagnostic detects absorbed effects without
+                # rejecting a valid residual regression due to raw X levels.
+                nuisance <- stats::model.matrix(mod_Y)
+                rows <- match(rownames(mod_Y$model), rownames(data.frame(object@U)))
+                if (anyNA(rows)) stop("Cannot align formula predictors with the global association model.")
+                nuisance <- nuisance[, mod_Y$qr$pivot[seq_len(mod_Y$rank)], drop = FALSE]
+                joint <- cbind(nuisance, .lfmm2_formula_diagnostic(X)[rows, , drop = FALSE])
+                joint_fit <- stats::lm.fit(joint, numeric(nrow(joint)),
+                    tol = .Machine$double.eps * max(dim(joint)))
+                .lfmm2_check_estimable(joint_fit, spec$predictors, design = joint,
+                    columns = ncol(nuisance) + seq_len(d))
+              }
               mod_lm =  lm(res_Y ~ res_X)
+              if (formula_fit) .lfmm2_check_estimable(mod_lm, spec$predictors)
               statistics <- .lfmm2_full_statistics(mod_lm)
               r_squared <- statistics$adj.r.squared
               f_score <- statistics$fscores
@@ -362,7 +575,9 @@ setMethod("lfmm2.test", "lfmm2Class",
             
             ## All p-values returned    
             if (linear){
-              mod_lm <- lm(Y ~ ., data = data.frame(X, object@U)) 
+              mod_lm <- lm(Y ~ ., data = data.frame(X, object@U))
+              if (formula_fit) .lfmm2_check_estimable(mod_lm, spec$predictors,
+                                                     expected = environment_names)
               statistics <- .lfmm2_linear_statistics(mod_lm, d)
               p_value <- statistics$pvalues
               z_score <- statistics$zscores
@@ -370,6 +585,8 @@ setMethod("lfmm2.test", "lfmm2Class",
               na_action <- getOption("na.action")
               j <- 1L
               mod_glm <- glm(Y[, j] ~ ., data = data.frame(X, object@U), family = family)
+              if (formula_fit) .lfmm2_check_estimable(mod_glm, spec$predictors,
+                                                     expected = environment_names)
               sm <- summary(mod_glm)
               probability <- sm$coeff[2:(d + 1), 4]
               statistic <- sm$coeff[2:(d + 1), 3]
@@ -404,6 +621,8 @@ setMethod("lfmm2.test", "lfmm2Class",
                 } else {
                   mod_glm <- glm(Y[, j] ~ ., data = data.frame(X, object@U), family = family)
                 }
+                if (formula_fit) .lfmm2_check_estimable(mod_glm, spec$predictors,
+                                                       expected = environment_names)
                 sm <- summary(mod_glm)
                 p_value[j, ] <- sm$coeff[2:(d + 1), 4]
                 z_score[j, ] <- sm$coeff[2:(d + 1), 3]

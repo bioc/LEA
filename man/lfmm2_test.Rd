@@ -34,6 +34,29 @@ A logical value. If \code{TRUE}, the p-values are recalibrated by using genomic 
 }
 }
 
+\details{
+For an object fitted with a formula in \code{lfmm2}, supply a numeric data
+frame in \code{env}. The stored formula selects and transforms the columns
+in the fitted order; physical data-frame columns may be reordered. No
+variable is looked up in the original formula environment. Required
+variables, dimensions and predictor structure are checked. The matrix
+passed to the association regressions remains uncentered, and their
+intercepts and inference are unchanged. Environmental coefficient estimability
+is checked in the effective association models, including intercept and
+latent factors. The linear and global checks are performed once per call;
+GLMs are checked at every locus because their working weights can differ.
+Non-estimable predictors cause an error naming the affected terms. These
+checks do not apply to the historical path without a formula.
+
+Supply the same environmental values and individual order as at fitting.
+No fingerprint or complete environmental matrix is saved, so changes to
+values or to the true identity/order of individuals are not detected.
+Names alone are not a verification of individual identity. Different loci
+may be tested for the same individuals. Old S4 objects without metadata
+and objects fitted without a formula retain the historical path; the
+user is responsible for using the fitted predictors consistently.
+}
+
 \value{
 \item{pvalues}{If \code{full} is set to \code{FALSE}, a matrix of p-values for all loci and for each environmental variable. Otherwise a vector of p-values for all loci (all environmental variables are included in the model).}
 \item{zscores}{If \code{full} is set to \code{FALSE}, a matrix of z-scores for each locus and each environmental variable.}
