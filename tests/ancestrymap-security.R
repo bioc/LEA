@@ -1,4 +1,6 @@
 library(LEA)
+base <- if (dir.exists("ancestrymap/fixtures")) "ancestrymap" else "tests/ancestrymap"
+source(file.path(base, "baseline-helpers.R"))
 
 local({
     root <- tempfile("ancestrymap-security-")
@@ -19,7 +21,9 @@ local({
                                error = identity)
             if (is.null(pattern)) {
                 stopifnot(!inherits(result, "error"), identical(result, output))
-                observed <- readChar(output, file.info(output)$size, useBytes = TRUE)
+                # C text-mode output uses CRLF on Windows. Preserve every other
+                # byte, rejecting NUL, bare CR and mixed output line endings.
+                observed <- am_eol(am_bytes(output))
                 stopifnot(identical(observed, expected[[format]]))
             } else {
                 stopifnot(inherits(result, "error"),
