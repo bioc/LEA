@@ -27,9 +27,13 @@
 /**
  * @brief mask (not used) 
  */
-#if defined(__i386__)
-// IA-32
+#if defined(__i386__) || defined(__wasm32__)
+// IA-32 or Wasm32
+#if defined(__wasm32__)
+typedef uint32_t bituint;
+#else
 typedef uint_fast32_t bituint;
+#endif
 #define SIZEUINT 32
 
 static const bituint mask[SIZEUINT] = {
