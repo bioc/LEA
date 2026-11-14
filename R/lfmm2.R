@@ -231,6 +231,9 @@ lfmm2 <- function(input,
                   effect.sizes = FALSE,
                   formula = NULL){
 
+    input.expression <- substitute(input)
+    env.expression <- substitute(env)
+
 ## Check input response matrix 
 ## LEA  
     if (is.character(input)){
@@ -278,6 +281,17 @@ lfmm2 <- function(input,
     stop("The environmental covariate matrix X contains more columns (d) than rows (n).")
   }
   
+  fit.info <- list(version = 1L,
+      genotype = list(label = .lfmm2_input_label(input.expression, input),
+          mode = .lfmm2_input_mode(input), dimensions = dim(Y)),
+      environment = list(label = .lfmm2_input_label(env.expression, env),
+          mode = .lfmm2_input_mode(env),
+          dimensions = if (is.character(env)) dim(X) else dim(as.matrix(env))),
+      fitted.dimensions = dim(X), predictors = colnames(X),
+      formula = prepared$spec$formula,
+      predictor.sd = vapply(seq_len(ncol(X)), function(j) stats::sd(X[, j]), numeric(1)))
+  names(fit.info$predictor.sd) <- colnames(X)
+
 # centering  
   Xs <- scale(X, scale = FALSE)
   Ys <- scale(Y, scale = FALSE)
@@ -309,13 +323,28 @@ lfmm2 <- function(input,
     U <- crossprod(t(Q %*% D_inv), svk$u %*% Sigma_k)
     #U <- Q %*% D_inv %*% svk$u %*% Sigma_k
     V <- svk$v[,1:K]
+    # The full SVD output is no longer needed during coefficient computation.
+    rm(svk)
 
 # compute environmental effect sizes 
     if (effect.sizes){
     B <- (t(Ys - W) %*% Xs) %*% solve(t(Xs) %*% Xs + diag(lambda, nrow = d, ncol = d))
     B <- as.matrix(B)
-    } else
-    {B <-  matrix(NA)}
+    Cb <- crossprod(B) / nrow(B)
+    } else {
+        # Use the identical ridge coefficient definition in bounded locus blocks.
+        ridge <- solve(t(Xs) %*% Xs + diag(lambda, nrow = d, ncol = d))
+        Cb <- matrix(0, d, d)
+        block.size <- max(1L, floor(1e6 / max(n, d)))
+        for (first in seq.int(1L, ncol(Ys), by = block.size)) {
+            loci <- seq.int(first, min(ncol(Ys), first + block.size - 1L))
+            coefficients <- crossprod(Ys[, loci, drop = FALSE] - W[, loci, drop = FALSE], Xs) %*% ridge
+            Cb <- Cb + crossprod(coefficients)
+        }
+        Cb <- Cb / ncol(Ys)
+        B <- matrix(NA)
+    }
+    dimnames(Cb) <- list(colnames(X), colnames(X))
     
     
 
@@ -326,6 +355,8 @@ lfmm2 <- function(input,
     obj@U <- as.matrix(U)
     obj@V <- as.matrix(V)
     attr(obj, "env.spec") <- prepared$spec
+    attr(obj, "fit.info") <- fit.info
+    attr(obj, "gea.metric") <- list(version = 1L, Cb = Cb)
 
 ## LEA 
     return(obj)

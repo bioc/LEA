@@ -100,3 +100,6 @@ export(genetic.gap)
 #export(.DollarNames.lfmmClass)
 #export(.DollarNames.snmfProject)
 
+
+exportMethods(print)
+S3method(print, summary.lfmm2)

@@ -1,5 +1,9 @@
 \name{lfmm2}
 \alias{lfmm2}
+\alias{show,lfmm2Class-method}
+\alias{print,lfmm2Class-method}
+\alias{summary,lfmm2Class-method}
+\alias{print.summary.lfmm2}
 \alias{lfmm2.test,lfmm2Class-method}
 
 
@@ -25,13 +29,63 @@ lfmm2 (input, env, K, lambda = 1e-5, effect.sizes = FALSE, formula = NULL)
     A positive numeric value for a ridge regularization parameter. The default value is set to 1e-5.
 }
 \item{effect.sizes}{ 
-    A logical value that indicates whether the matrix of effect sizes should be returned or not. The default value is set to \code{FALSE} for saving memory space. 
+    A logical value indicating whether per-locus GEA coefficients are retained in \code{@B}. The default \code{FALSE} keeps the historical NA placeholder and saves storage. Coefficients are still estimated internally to retain their small second-moment matrix Cb in both modes.
 }
 \item{formula}{An optional one-sided formula, allowed only with a numeric data frame in \code{env}. The default \code{NULL} uses every column in its original order. Supported terms are numeric variables, \code{I(x^k)} for positive literal integer powers, \code{log(x)} and \code{sqrt(x)}, joined by \code{+}. Interactions, factors, arbitrary calls and \code{.} are not supported. Non-numeric data-frame columns cause an error even if not selected.}
 }
 
 
 \details{
+New fits carry optional version-1 attributes without changing the five S4
+slots or the version-1 \code{env.spec} schema. The descriptive
+\code{fit.info} list contains \code{version}, \code{genotype} and
+\code{environment} records (\code{label}, \code{mode},
+\code{dimensions}), \code{fitted.dimensions}, \code{predictors},
+\code{formula}, and \code{predictor.sd}. Labels capture argument
+expressions without re-evaluation, or file paths for file input. Long
+expression labels are truncated. No input matrices, environments or calls
+are retained. Environmental dimensions describe the original table;
+fitted dimensions, ordered names and sample standard deviations describe
+the actual transformed predictor columns before internal centering.
+Standard deviations are descriptive and do not change fitting.
+
+The separate \code{gea.metric} attribute is a list with \code{version = 1L}
+and \code{Cb}, a finite symmetric d-by-d numeric matrix in fitted predictor
+order, with predictor dimnames when available. For L fitted loci and the
+L-by-d coefficient matrix B, \eqn{C_b = B^T B/L}. This is an uncentered
+second moment, not a covariance matrix. With retained coefficients it uses
+\code{crossprod(B)/L}; otherwise equivalent crossproducts are accumulated
+in locus blocks without retaining the full B. No eigendecomposition is stored
+in the fit. The estimator, ridge penalty and association tests are unchanged.
+
+\code{show} and \code{print} display concise provenance, dimensions,
+latent-factor location and coefficient-retention information, without
+printing matrices, accessing input files or computing eigenvalues.
+Unavailable historical provenance is explicitly identified.
+\code{summary} computes the symmetric eigendecomposition of Cb and returns
+all eigenvalues in decreasing order, eigenvectors, spectral proportions,
+cumulative proportions, and the smallest number of leading axes reaching
+99 percent. Small negative roundoff eigenvalues are clipped to zero using
+a scale-aware tolerance (100 times machine epsilon times d, on a unit-scale
+metric). Materially asymmetric, indefinite, nonfinite or malformed metrics
+are reported as unavailable. A zero trace gives undefined proportions and
+an undefined 99-percent axis count. Historical objects without Cb use valid
+retained B; the 1-by-1 NA placeholder is never treated as coefficients.
+Without either, the spectrum is unavailable. Missing or malformed descriptive
+metadata does not prevent concise display.
+
+Standardizing environmental predictors to unit standard deviation (sd = 1)
+is recommended before fitting LFMM2 for meaningful comparisons of spectral
+contributions. For formula fits this refers to the transformed predictor
+columns used in the fit. Standardization should precede fitting, not merely
+spectral decomposition. No automatic standardization is performed.
+Spectral contributions depend on predictor scaling and coordinates:
+99 percent of the Cb spectrum does not mean 99 percent of total genotype
+variance. Dominant axes are linear combinations of predictors; retaining r
+axes is not equivalent to removing d-r original environmental variables.
+Reparameterization and refitting under ridge regularization are not
+necessarily equivalent.
+
 Formula transformations are applied before the existing column centering.
 No intercept column is added to the environmental matrix. This does not
 remove the intercept from the association regressions in \code{lfmm2.test}.
@@ -70,6 +124,18 @@ association path. No restriction on the identity of tested loci is added.
 
 \value{
 \code{lfmm2} returns an object of class \code{lfmm2Class} that contains $K$ estimated latent factors \code{@U} and their loadings  \code{@V}.
+
+\code{show} and \code{print} return the fit invisibly.
+\code{summary} returns a compact S3 list of class \code{summary.lfmm2},
+with model information and \code{gea.spectrum}. For an available spectrum,
+the latter contains \code{available}, \code{source}, \code{eigenvalues},
+\code{vectors}, \code{proportion}, \code{cumulative}, \code{axes99},
+\code{variables}, \code{tolerance}, and \code{relative.tolerance}.
+An unavailable spectrum contains \code{available = FALSE} and \code{reason}.
+The summary print method returns its argument invisibly and may omit trailing
+axes when there are more than twelve predictors; the full spectrum remains
+available programmatically. Eigenvector signs and bases within repeated
+eigenvalues are indeterminate.
 
 The following method can be applied to an object of class \code{lfmm2Class}:
 
