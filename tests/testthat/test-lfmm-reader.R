@@ -1,3 +1,15 @@
+# Frozen extreme doubles can differ across R builds in the last few bits.
+# Compare each finite nonzero element relative to itself, never to matrix scale.
+reader_extreme_equal <- function(actual, expected) {
+    if (!identical(typeof(actual), typeof(expected)) ||
+        !identical(attributes(actual), attributes(expected))) return(FALSE)
+    if (!is.double(expected)) return(identical(actual, expected))
+    finite <- is.finite(expected) & expected != 0
+    if (!identical(is.finite(actual) & actual != 0, finite) ||
+        !identical(actual[!finite], expected[!finite])) return(FALSE)
+    all(abs(actual[finite] / expected[finite] - 1) <= 8 * .Machine$double.eps)
+}
+
 reader_capture <- function(fun, input) {
     warnings <- character()
     value <- tryCatch(withCallingHandlers(fun(input), warning = function(w) {
@@ -15,15 +27,18 @@ reader_fixture <- function(name) {
     input
 }
 
-test_that("published reader fixtures preserve exact values, types, names and warnings", {
+test_that("published reader fixtures preserve values, exact types, names and warnings", {
     expected <- readRDS(test_path("..", "lfmm-reader", "expected.rds"))
     for (name in names(expected)) {
         input <- reader_fixture(name)
         actual <- reader_capture(read.lfmm, input)
         expect_identical(actual$ok, expected[[name]]$ok, info = name)
         expect_identical(actual$warnings, expected[[name]]$warnings, info = name)
-        if (actual$ok) expect_identical(actual$value, expected[[name]]$value, info = name)
-        else {
+        if (actual$ok) {
+            if (name == "exponents")
+                expect_true(reader_extreme_equal(actual$value, expected[[name]]$value), info = name)
+            else expect_identical(actual$value, expected[[name]]$value, info = name)
+        } else {
             legacy <- reader_capture(function(p) as.matrix(read.table(p)), input)
             expect_identical(conditionMessage(actual$value), conditionMessage(legacy$value), info = name)
         }
@@ -125,4 +140,52 @@ test_that("permissive scan spellings cannot silently change legacy token types",
         else expect_identical(conditionMessage(actual$value), conditionMessage(legacy$value), info = token)
         unlink(input)
     }
+})
+
+
+test_that("extreme fixture tolerance is relative per element and preserves exact contracts", {
+    expected <- matrix(c(1e-300, 1e300, 0, NA_real_, NaN, Inf, -Inf),
+                       nrow = 1, dimnames = list(NULL, letters[1:7]))
+    expect_true(reader_extreme_equal(expected, expected))
+    for (i in 1:2) {
+        for (direction in c(-1, 1)) {
+            actual <- expected
+            actual[i] <- expected[i] * (1 + direction * 4 * .Machine$double.eps)
+            expect_false(identical(actual, expected))
+            expect_true(reader_extreme_equal(actual, expected))
+            for (error in c(32 * .Machine$double.eps, 1e-6)) {
+                actual[i] <- expected[i] * (1 + direction * error)
+                expect_false(reader_extreme_equal(actual, expected))
+            }
+        }
+        for (replacement in c(0, -expected[i], Inf, NA_real_, NaN)) {
+            actual <- expected
+            actual[i] <- replacement
+            expect_false(reader_extreme_equal(actual, expected))
+        }
+    }
+    for (i in 3:7) {
+        actual <- expected
+        actual[i] <- if (i == 3) 1e-300 else 0
+        expect_false(reader_extreme_equal(actual, expected))
+    }
+    actual <- expected
+    actual[4] <- NaN
+    expect_false(reader_extreme_equal(actual, expected))
+    actual <- expected
+    actual[5] <- NA_real_
+    expect_false(reader_extreme_equal(actual, expected))
+    actual <- expected
+    colnames(actual)[1] <- "changed"
+    expect_false(reader_extreme_equal(actual, expected))
+    actual <- expected
+    attr(actual, "note") <- "changed"
+    expect_false(reader_extreme_equal(actual, expected))
+    expect_false(reader_extreme_equal(t(expected), expected))
+    expect_false(reader_extreme_equal(as.vector(expected), expected))
+    expect_false(reader_extreme_equal(1, 1L))
+    expect_true(reader_extreme_equal(1L, 1L))
+    expect_false(reader_extreme_equal(2L, 1L))
+    expect_false(reader_extreme_equal("changed", "original"))
+    expect_false(reader_extreme_equal(FALSE, TRUE))
 })
